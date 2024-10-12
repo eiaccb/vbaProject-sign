@@ -14,6 +14,7 @@ class OpenXML:
         self.opc = OPC(input)
 
         parts = self.opc.find('application/vnd.ms-office.vbaProject')
+        logging.debug("{} vbaProject part(s) found".format(len(parts)))
         if len(parts) == 0:
             self.vbaProject = None
         elif len(parts) == 1:
@@ -40,3 +41,33 @@ class OpenXML:
                 else:
                     logger.debug("Related part %s has unhandled type %s" % (pn, pn_type))
 
+    @property
+    def has_macros(self):
+        return True if self.vbaProject else False
+
+    @property
+    def has_signed_macros_legacy(self):
+        if self.has_macros:
+            if self.vbaProjectSignature:
+                return True
+        return False
+
+    @property
+    def has_signed_macros_agile(self):
+        if self.has_macros:
+            if self.vbaProjectSignatureAgile:
+                return True
+        return False
+
+    @property
+    def has_signed_macros_v3(self):
+        if self.has_macros:
+            if self.vbaProjectSignatureV3:
+                return True
+        return False
+
+    @property
+    def has_signed_macros(self):
+        if self.has_signed_macros_legacy or self.has_signed_macros_agile or has_signed_macros_v3:
+                return True
+        return False
