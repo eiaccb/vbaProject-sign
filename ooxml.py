@@ -16,53 +16,45 @@ class OpenXML:
         parts = self.opc.find('application/vnd.ms-office.vbaProject')
         logging.debug("{} vbaProject part(s) found".format(len(parts)))
         if len(parts) == 0:
-            self.vbaProject = None
+            self.vbaProjectFileName = None
         elif len(parts) == 1:
-            self.vbaProject = parts[0]
+            self.vbaProjectFileName = parts[0]
         else:
             logger.error("More than one part with media type application/vnd.ms-office.vbaProject - unsupported")
-            self.vbaProject = None
+            self.vbaProjectFileName = None
 
-        self.vbaProjectSignature = None
-        self.vbaProjectSignatureAgile = None
-        self.vbaProjectSignatureV3 = None
+        self.vbaProjectSignatureFileName = None
+        self.vbaProjectSignatureAgileFileName = None
+        self.vbaProjectSignatureV3FileName = None
 
-        if self.vbaProject:
-            related = self.opc.find_related(self.vbaProject)
-            for pn in related:
-                pn_type = self.opc.part_media_type(pn)
-
-                if pn_type == 'application/vnd.ms-office.vbaProjectSignature':
-                    self.vbaProjectSignature = pn
-                elif pn_type == 'application/vnd.ms-office.vbaProjectSignatureAgile':
-                    self.vbaProjectSignatureAgile = pn
-                elif pn_type == 'application/vnd.ms-office.vbaProjectSignatureV3':
-                    self.vbaProjectSignatureV3 = pn
-                else:
-                    logger.debug("Related part %s has unhandled type %s" % (pn, pn_type))
+        if self.vbaProjectFileName:
+            related = self.opc.find_related(self.vbaProjectFileName)
+            self.vbaProjectSignatureFileName = related.get('vbaProjectSignature', None)
+            self.vbaProjectSignatureAgileFileName = related.get('vbaProjectSignatureAgile', None)
+            self.vbaProjectSignatureV3FileName = related.get('vbaProjectSignatureV3', None)
 
     @property
     def has_macros(self):
-        return True if self.vbaProject else False
+        return True if self.vbaProjectFileName else False
 
     @property
     def has_signed_macros_legacy(self):
         if self.has_macros:
-            if self.vbaProjectSignature:
+            if self.vbaProjectSignatureFileName:
                 return True
         return False
 
     @property
     def has_signed_macros_agile(self):
         if self.has_macros:
-            if self.vbaProjectSignatureAgile:
+            if self.vbaProjectSignatureAgileFileName:
                 return True
         return False
 
     @property
     def has_signed_macros_v3(self):
         if self.has_macros:
-            if self.vbaProjectSignatureV3:
+            if self.vbaProjectSignatureV3FileName:
                 return True
         return False
 
