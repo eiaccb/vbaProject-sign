@@ -1,4 +1,5 @@
 
+# Bring signature code from original OpenXML.py
 
 # Formats in [MS-OSHARED] https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-oshared/f80ee18c-d72f-4c3c-9ea5-a56f396322e0
 # Handle signatures
@@ -63,7 +64,25 @@
 # characters. The field is reserved and MUST be a single null Unicode
 # character (0x0000).
 
+import logging
+logger = logging.getLogger(__name__)
+
 from struct import pack, unpack
+from binascii import hexlify
+import hashlib
+
+import pkcs7
+
+def oid2hashlib(digestAlgorithm):
+    oid = digestAlgorithm.algorithm.dotted_string
+    if oid == '1.2.840.113549.2.5':
+        return hashlib.md5
+    elif oid == '2.16.840.1.101.3.4.2.1':
+        return hashlib.sha256
+    elif oid == '2.16.840.1.101.3.4.2.3':
+        return hashlib.sha512
+    else:
+        raise ValueError('Unknown algorithm %s' % digestAlgorithm)
 
 # [MS-OSHARED] 2.3.2.1 DigSigInfoSerialized
 
@@ -78,7 +97,8 @@ class DigSigInfoSerialized:
     def __init__(self, data=None, offset=0):
 
         if data:
-            self._initialized = False
+            logger.debug("DigSigInfoSerialized: " + str(hexlify(data[:128])))
+            self._initialized = True
             self.offset = offset
             (
                 cbSignature,
@@ -90,21 +110,25 @@ class DigSigInfoSerialized:
                 fTimestamp,
                 cbTimestampUrl,
                 timestampUrlOffset,
-            ) unpack('<LLLLLLLLL', data[0:9*4])
+            ) = unpack('<LLLLLLLLL', data[0:9*4])
+            signatureOffset -= offset
             self.pbSignatureBuffer = data[
-                signatureOffset - offset,
-                signatureOffset - offset + cbSignature]
+                signatureOffset:signatureOffset + cbSignature]
+            certStoreOffset -= offset
             self.pbSigningCertStoreBuffer = data[
-                certStoreOffset - offset,
-                certStoreOffset - offset + cbSigningCertStore]
+                certStoreOffset:certStoreOffset + cbSigningCertStore]
+            projectNameOffset -= offset
             self.rgchProjectNameBuffer = data[
-                projectNameOffset - offset,
-                projectNameOffset - offset + cbProjectName]
+                projectNameOffset:projectNameOffset + cbProjectName]
+            timestampUrlOffset -= offset
             self.rgchTimestampBuffer = data[
-                timestampUrlOffset - offset,
-                timestampUrlOffset - offset + cbTimestampUrl]
+                timestampUrlOffset:timestampUrlOffset + cbTimestampUrl]
+            logger.debug("DigSigInfoSerialized: Signature ({} bytes) from {}: {}...".format(cbSignature, signatureOffset, hexlify(data[signatureOffset:50])))
+            logger.debug("DigSigInfoSerialized: CertStore ({} bytes) from {}: {}...".format(cbSigningCertStore, certStoreOffset, hexlify(data[cbSigningCertStore:50])))
+            logger.debug("DigSigInfoSerialized: ProjectName ({} bytes) from {}: {}...".format(cbProjectName, projectNameOffset, hexlify(data[projectNameOffset:50])))
 
         else:
+            self._initialized = False
             self.pbSignatureBuffer = None
             self.pbSigningCertStoreBuffer = None
             self.rgchProjectNameBuffer = None
@@ -153,6 +177,44 @@ class DigSigInfoSerialized:
 
 # [MS-OSHARED] 2.3.2.2 DigSigBlob
 
+class DigSigBlob:
+
+    def __init__(self, data=None):
+
+        if data:
+            logger.debug("DigSigBlob ({} bytes): ".format(len(data)) + str(hexlify(data)))
+            (
+                cb,
+                serializedPointer,
+            ) = unpack('<LL', data[0:8])
+            if serializedPointer != 8:
+                raise ValueError("Invalid DigSigBlob, serializedPointer={}".format(serializedPointer))
+            logger.debug("DigSigBlob: cb={} serializedPointer={}".format(cb, serializedPointer)) 
+            self.signatureInfo = DigSigInfoSerialized(
+                data[serializedPointer:],
+                offset=serializedPointer)
+        else:
+            self.signatureInfo = None
+
+    def get_block(self):
+        if not self.signatureInfo:
+            raise ValueError("Instance of DigSigBlob is not initialized")
+
+        signatureInfo = self.signatureInfo.get_block(offset=12)
+        cbSigInfo = len(signatureInfo)
+        serializedPointer = 8
+        cch = (cbSigInfo + (cbSigInfo % 2) + 8) / 2
+        first_part('<LL', cb, cbSigInfo, serializedPointer)
+        first
+        if cbSiginfo % 2 == 0:
+            padding = b''
+        else:
+            padding = b'0x0'
+      
+        return first_part + signatureInfo + padding
+
+# [MS-OSHARED] 2.3.2.3 WordSigBlob
+
 # cch (2 bytes): An unsigned integer that specifies half the count of
 # bytes of the remainder of the structure. MUST be the value given by
 # the following formula.
@@ -174,16 +236,18 @@ class DigSigInfoSerialized:
 # multiple of 2 bytes. The contents of this field are undefined and
 # MUST be ignored.
 
-class DigSigBlob:
+class WordSigBlob:
 
     def __init__(self, data=None):
 
         if data:
+            logger.debug("WordSigBlob ({} bytes): ".format(len(data)) + str(hexlify(data)))
             (
                 cch,
                 cbSigInfo,
                 serializedPointer,
-            ) unpack('<HLL', data[0:10])
+            ) = unpack('<HLL', data[0:10])
+            logger.debug("WordSigBlob: cch={} cbSigInfo={} serializedPointer={}".format(cch, cbSigInfo, serializedPointer)) 
             self.signatureInfo = DigSigInfoSerialized(
                 data[10:10+cbSigInfo],
                 offset=12)
@@ -198,7 +262,7 @@ class DigSigBlob:
         signatureInfo = self.signatureInfo.get_block(offset=12)
         cbSigInfo = len(signatureInfo)
         serializedPointer = 8
-        cch = (cbSigInfo + (cbSigInfo mod 2) + 8) / 2
+        cch = (cbSigInfo + (cbSigInfo % 2) + 8) / 2
         first_part('<HLL', cch, cbSigInfo, serializedPointer)
         first
         if cbSiginfo % 2 == 0:
@@ -208,4 +272,190 @@ class DigSigBlob:
       
         return first_part + signatureInfo + padding
     
-# [MS-OSHARED] 2.3.2.3 WordSigBlob
+from enum import Enum
+
+# class syntax
+
+class SignatureKind(Enum):
+    LEGACY = 1
+    AGILE = 2
+    V3 = 3
+
+sig_offset = 8 # 8 for DigSigBlob, 10 for WordSigBlob
+
+# TODO: Maybe split signature kinds to separate files
+class VbaProjectSignature:
+
+    def __init__(self, ooxml, kind, part_name=None, part=None):
+        self.ooxml = ooxml
+        self.kind = kind
+        self.part_name = part_name
+        self.part = part
+        self.signature = None
+
+    @classmethod
+    def get(cls, ooxml, kind):
+        logger.error("Deprecated method signature.vbaProjectSignature.get()")
+        return ooxml.get_signature(kind)
+
+    @classmethod
+    def get_class(cls, kind):
+        if kind == SignatureKind.LEGACY:
+            return VbaProjectSignatureLegacy
+        elif kind == SignatureKind.AGILE:
+            return VbaProjectSignatureAgile
+        elif kind == SignatureKind.V3:
+            return VbaProjectSignatureV3
+        else:
+            raise ValueError("Unknown signature kind {}".format(kind))
+    
+    @classmethod
+    def parse(cls, ooxml, kind, part_name, part):
+        # We ignore class
+        new_class = cls.get_class(kind)
+        self = new_class(ooxml, kind, part_name, part)
+
+        # Offsets in a DigSigInfoSerialized are relative to an enclosing
+        # structure. But the enclosing structure is not present in our case.
+        # So we need to tell the extractor about the offset value.
+        self.sig_info = DigSigInfoSerialized(part, sig_offset)
+        try:
+            self.signature = pkcs7.ContentInfo.parse(data=self.sig_info.pbSignatureBuffer)
+        except pkcs7.ASN1Error as e:
+            print('\nError de ASN1:')
+            print("Se esperaba %s" % str(e.args[0]['expected']))
+            print("Se encontró %s" % str(e.args[0]['found']))
+            raise
+
+        return self
+
+keep_signature_copies = True
+keep_normalized_copies = True
+
+class VbaProjectSignatureLegacy(VbaProjectSignature):
+
+    def analyze(self):
+        if keep_signature_copies:
+            open('sig_legacy.p7b', 'wb').write(self.sig_info.pbSignatureBuffer)
+
+        logger.info(self.signature)
+        signedData = self.signature.content
+        logger.info(signedData)
+        logger.info(signedData.digestAlgorithms)
+        logger.info(signedData.contentInfo)
+        for si in signedData.signerInfos:
+            logger.info(si)
+
+        dataContent = signedData.contentInfo.content
+        data = dataContent.data
+        logger.info(data)
+        digestInfo = dataContent.messageDigest
+        logger.debug(digestInfo.digestAlgorithm)
+        logger.debug(digestInfo.digest)
+
+    @classmethod
+    def contentHash(cls, vbaProject, digestAlgorithmOID):
+        # TBC: Remove from vbaProject
+        ContentBuffer = bytearray()
+
+        ContentNormalizedData = vbaProject.ContentNormalizedData()
+
+        logger.info("ContentNormalizedData: %s" % hexlify(ContentNormalizedData))
+        ContentBuffer.extend(ContentNormalizedData)
+
+        if keep_normalized_copies:
+            open("NormalizedData.bin", "wb").write(ContentBuffer)
+        digest_algorithm = oid2hashlib(digestAlgorithmOID)
+        hash = digest_algorithm(ContentBuffer)
+        logger.debug("ContentHash: %s" % hash.hexdigest())
+        return hash
+    
+class VbaProjectSignatureAgile(VbaProjectSignature):
+
+    def analyze(self):
+        if keep_signature_copies:
+            open('sig_agile.p7b', 'wb').write(self.sig_info.pbSignatureBuffer)
+
+        logger.info(self.signature)
+        signedData = self.signature.content
+        logger.info(signedData)
+        logger.info(signedData.digestAlgorithms)
+        logger.info(signedData.contentInfo)
+        for si in signedData.signerInfos:
+            logger.info(si)
+
+        dataContent = signedData.contentInfo.content
+        data = dataContent.data
+        logger.info(data)
+        digestInfo = dataContent.messageDigest
+        logger.debug(digestInfo.digestAlgorithm)
+        logger.debug(digestInfo.digest)
+
+    @classmethod
+    def contentHash(cls, vbaProject, digestAlgorithmOID):
+        # TBC: Remove from vbaProject
+        ContentBuffer = bytearray()
+
+        # MS-OVBA 2.4.2.1
+        ContentNormalizedData = vbaProject.ContentNormalizedData()
+
+        logger.info("AgileContentNormalizedData: %s" % hexlify(ContentNormalizedData))
+        ContentBuffer.extend(ContentNormalizedData)
+
+        # MS-OVBA 2.4.2.2
+        FormsNormalizedData = vbaProject.FormsNormalizedData()
+        logger.info("FormsNormalizedData: %s" % hexlify(FormsNormalizedData))
+        ContentBuffer.extend(FormsNormalizedData)
+
+        if keep_normalized_copies:
+            open("AgileNormalizedData.bin", "wb").write(ContentBuffer)
+
+        digest_algorithm = oid2hashlib(digestAlgorithmOID)
+        hash = digest_algorithm(ContentBuffer)
+        return hash
+    
+class VbaProjectSignatureV3(VbaProjectSignature):
+
+    def analyze(self):
+        if keep_signature_copies:
+            open('sig_v3.p7b', 'wb').write(self.sig_info.pbSignatureBuffer)
+
+        logger.info(self.signature)
+        signedData = self.signature.content
+        logger.info(signedData)
+        logger.info(signedData.digestAlgorithms)
+        logger.info(signedData.contentInfo)
+        for si in signedData.signerInfos:
+            logger.info(si)
+
+        dataContent = signedData.contentInfo.content
+        data = dataContent.data
+        logger.info(data)
+        digestInfo = dataContent.messageDigest
+        logger.debug(digestInfo.digestAlgorithm)
+        logger.debug(digestInfo.digest)
+
+    @classmethod
+    def contentHash(cls, vbaProject, digestAlgorithmOID):
+        # TBC: Remove from vbaProject
+        ContentBuffer = bytearray()
+        # 2.4.2.5 V3 Content Normalized Data
+
+        ContentNormalizedData = vbaProject.v3_content_normalized_data()
+        logger.info("V3ContentNormalizedData: %s" % hexlify(ContentNormalizedData))
+        ContentBuffer.extend(ContentNormalizedData)
+
+        # 2.4.2.6 Project Normalized Data
+        ProjectNormalizedData = vbaProject.ProjectNormalizedData()
+        logger.debug("ProjectNormalizedData: %s" % hexlify(ProjectNormalizedData))
+        ContentBuffer.extend(ProjectNormalizedData)
+
+        open("V3NormalizedData.bin", "wb").write(ContentBuffer)
+
+        if keep_normalized_copies:
+            open("V3NormalizedData.bin", "wb").write(ContentBuffer)
+
+        digest_algorithm = oid2hashlib(digestAlgorithmOID)
+        hash = digest_algorithm(ContentBuffer)
+        return hash
+    

@@ -112,7 +112,14 @@ class OPC:
         rels_part_name = base + '/_rels' + part_name[barpos:] + '.rels'
         logger.debug("Relationships part for {} is {}".format(part_name, rels_part_name))
 
-        rt = self.zipfile.open(rels_part_name[1:])
+        related = dict()
+
+        try:
+            rt = self.zipfile.open(rels_part_name[1:])
+        except KeyError:
+            logger.debug("No rels file for {}".format(part_name))
+            return related
+
         rt_xml = etree.parse(rt)
         rels = rt_xml.getroot()
 
@@ -120,7 +127,6 @@ class OPC:
         # against the full values
         ns = 'http://schemas.openxmlformats.org/package/2006/relationships'
 
-        related = dict()
         for e in rels.iterfind('.//{%s}' % ns + 'Relationship'):
             id = e.get('Id')
             target = e.get('Target')
@@ -140,5 +146,8 @@ class OPC:
             related[kind] = target
                     
         return related
-        
 
+    def read_part(self, part_name):
+        pname = part_name[1:] if part_name.startswith('/') else part_name
+        f = self.zipfile.open(pname)
+        return f.read()
