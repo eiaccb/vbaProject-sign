@@ -329,6 +329,18 @@ class VbaProjectSignature:
 
         return self
 
+    @property
+    def signatureHash(self):
+        raise NotImplementedError
+
+    @property
+    def digestAlgorithmOID(self):
+
+        signedData = self.signature.content
+        dataContent = signedData.contentInfo.content
+        digestInfo = dataContent.messageDigest
+        return digestInfo.digestAlgorithm
+
 keep_signature_copies = True
 keep_normalized_copies = True
 
@@ -370,6 +382,13 @@ class VbaProjectSignatureLegacy(VbaProjectSignature):
         logger.debug("ContentHash: %s" % hash.hexdigest())
         return hash
     
+    @property
+    def signatureHash(self):
+
+        signedData = self.signature.content
+        spcidc = signedData.contentInfo.content
+        return spcidc.messageDigest.digest
+
 class VbaProjectSignatureAgile(VbaProjectSignature):
 
     def analyze(self):
@@ -414,6 +433,14 @@ class VbaProjectSignatureAgile(VbaProjectSignature):
         hash = digest_algorithm(ContentBuffer)
         return hash
     
+    @property
+    def signatureHash(self):
+
+        signedData = self.signature.content
+        spcidc = signedData.contentInfo.content
+        # return spcidc.messageDigest.digest
+        return spcidc.messageDigest.digest_parsed.sourceHash
+
 class VbaProjectSignatureV3(VbaProjectSignature):
 
     def analyze(self):
@@ -459,3 +486,10 @@ class VbaProjectSignatureV3(VbaProjectSignature):
         hash = digest_algorithm(ContentBuffer)
         return hash
     
+    @property
+    def signatureHash(self):
+
+        signedData = self.signature.content
+        spcidc = signedData.contentInfo.content
+        # return spcidc.messageDigest.digest
+        return spcidc.messageDigest.digest_parsed.sourceHash
