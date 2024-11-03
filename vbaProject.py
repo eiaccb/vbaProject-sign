@@ -9,7 +9,9 @@ import re
 import logging
 logger = logging.getLogger(__name__)
 # logger.setLevel(logging.DEBUG)
+from uuid import UUID
 
+import officeparser
 from officeparser import CompoundBinaryFile, decompress_stream
 
 def setCodePage(project, raw_value):
@@ -142,7 +144,7 @@ dir_stream_syntax = {
         ['LibExtended', 'SizeOfLibidExtended', 'MBCS', None, True],
         ['Reserved4', 4, 'L', 0x00000000, False],
         ['Reserved5', 2, 'H', 0x0000, False],
-        ['OriginalTypeLib', 16, 'BYTES', None, True],
+        ['OriginalTypeLib', 16, 'GUID', None, True],
         ['Cookie', 4, 'L', None, True],
     ],
     'REFERENCEORIGINAL': [	# 2.3.4.2.2.4
@@ -432,7 +434,25 @@ class NormalizedReporter:
             len(self.data[self.pos:]),
             self.data[self.pos:self.pos+32],
             hexlify(self.data[self.pos:])))
-        
+
+_tested = {
+    0x000D: ['S0001', 'S0002', 'T0001', 'T0002', 'T0003', 'T0005'],
+    0x0016: ['S0001', 'S0002'],
+    0x0021: ['T0003', 'T0005'],
+    0x0028: ['S0001', 'S0002'],
+    0x002F: ['S0001', 'S0002'],
+    0x0033: ['S0001', 'S0002'],
+    0x003E: ['S0001', 'S0002'],
+}
+
+def report_traversed(section, kind, id):
+    if kind != 3:
+        raise NotImplementedError("Unimplemented reporting for kind {}".format(kind))
+    if id in _tested:
+        logger.error("V3 test coverage in {}: id 0x{:04X} tested in cases: {}".format(section, id, ', '.join(_tested[id])))
+    else:
+        logger.error("V3 test coverage in {}: id 0x{:04X} never tested!!".format(section, id))
+    
 def V3ContentNormalizedData_analyze(reporter):
     r = reporter
 
@@ -485,6 +505,7 @@ def V3ContentNormalizedData_analyze(reporter):
 
         if next_id == 0x0016:
 
+            report_traversed('V3ContentNormalizedData_analyze', 3, next_id)
             r.report_id('REFERENCENAME.Id', expected=0x0016)
             r.report_string('REFERENCENAME.SizeOfName', 'REFERENCENAME.Name')
             r.report_short('REFERENCENAME.Reserved')
@@ -493,16 +514,19 @@ def V3ContentNormalizedData_analyze(reporter):
 
         if next_id == 0x002F:
 
+            report_traversed('V3ContentNormalizedData_analyze', 3, next_id)
             r.report_id('REFERENCE.ReferenceControl.Id', expected=0x002F)
             r.report_string('REFERENCE.ReferenceControl.SizeOfLibidTwiddled', 'REFERENCE.ReferenceControl.LibidTwiddled')
             r.report_long('REFERENCE.ReferenceControl.Reserved1', expected=0x00000000)
             r.report_short('REFERENCE.ReferenceControl.Reserved2', expected=0x0000)
             next_id = r.next_id()
             if next_id == 0x0016:
+                report_traversed('V3ContentNormalizedData_analyze', 3, next_id)
                 r.report_id('REFERENCE.ReferenceControl.NameRecordExtended.Id', expected=0x0016)
                 r.report_string('REFERENCE.ReferenceControl.NameRecordExtended.Size', 'REFERENCE.ReferenceControl.NameRecordExtended.Name')
                 next_id = r.next_id()
                 if next_id == 0x003E:
+                    report_traversed('V3ContentNormalizedData_analyze', 3, next_id)
                     r.report_id('REFERENCE.ReferenceControl.NameRecordExtended.Reserved')
                     r.report_unicode('REFERENCE.ReferenceControl.NameRecordExtended.SizeOfNameUnicode', 'REFERENCE.ReferenceControl.NameRecordExtended.NameUnicode')
 
@@ -514,16 +538,19 @@ def V3ContentNormalizedData_analyze(reporter):
             r.report_long('REFERENCE.ReferenceControl.Cookie')
 
         elif next_id == 0x0033:
+            report_traversed('V3ContentNormalizedData_analyze', 3, next_id)
             r.report_id('REFERENCE.ReferenceOriginal.Id', expected=0x0033)
             r.report_string('REFERENCE.ReferenceOriginal.SizeOfLibidOriginal', 'REFERENCE.ReferenceOriginal.LibidOriginal')
 
         elif next_id == 0x000D:
+            report_traversed('V3ContentNormalizedData_analyze', 3, next_id)
             r.report_id('REFERENCE.ReferenceRegistered.Id', expected=0x000D)
             r.report_weird_unicode('REFERENCE.ReferenceRegistered.SizeOfLibid', 'REFERENCE.ReferenceRegistered.Libid')
             r.report_long('REFERENCE.ReferenceRegistered.Reserved1', expected=0x00000000)
             r.report_short('REFERENCE.ReferenceRegistered.Reserved2', expected=0x0000)
 
         elif next_id == 0x000E:
+            report_traversed('V3ContentNormalizedData_analyze', 3, next_id)
             r.report_id('REFERENCE.ReferenceProject.Id', expected=0x000E)
             r.report_string('REFERENCE.ReferenceProject.SizeOfLibidAbsolute', 'REFERENCE.ReferenceProject.LibidAbsolute')
             r.report_string('REFERENCE.ReferenceProject.SizeOfLibidRelative', 'REFERENCE.ReferenceProject.LibidRelative')
@@ -544,16 +571,19 @@ def V3ContentNormalizedData_analyze(reporter):
             break
 
         if next_id == 0x21:
+            report_traversed(3, next_id)
             r.report_id('MODULE.TypeRecord.Id', expected=0x0021)
             r.report_long('MODULE.TypeRecord.Reserved',expected=0x00000000)
             next_id == r.next_id()
 
         if next_id == 0x0025:
+            report_traversed('V3ContentNormalizedData_analyze', 3, next_id)
             r.report_id('MODULE.ReadOnlyRecord.Id', expected=0x0025)
             r.report_long('MODULE.ReadOnlyRecord.Reserved', expected=0x00000000)
             next_id == r.next_id()
 
         if next_id == 0x0028:
+            report_traversed('V3ContentNormalizedData_analyze', 3, next_id)
             r.report_id('MODULE.PrivateRecord.Id', expected=0x0028)
             r.report_long('MODULE.PrivateRecord.Reserved', expected=0x00000000)
             next_id == r.next_id()
@@ -611,6 +641,27 @@ class Reporter:
             text, self.pos, new_pos, length, length, hexlify(self.data[self.pos:])))
         self.pos = new_pos
 
+class Storage:
+
+    def __init__(self, init=None):
+        if init:
+            self.op_directory = init
+
+    def ls(self):
+        for entry in self.op_directory:
+            if entry._mse == officeparser.STGTY_STORAGE:
+                logger.error("Storage {}: {}".format(entry.index, entry.name))
+            elif entry._mse == officeparser.STGTY_STREAM:
+                logger.error("Stream {}: {}".format(entry.index, entry.name))
+            elif entry._mse == officeparser.STGTY_LOCKBYTES:
+                logger.error("Lockbytes {}: {}".format(entry.index, entry.name))
+            elif entry._mse == officeparser.STGTY_PROPERTY:
+                logger.error("Property {}: {}".format(entry.index, entry.name))
+            elif entry._mse == officeparser.STGTY_ROOT:
+                logger.error("Root {}: {}".format(entry.index, entry.name))
+            else:
+                logger.error("Unknown entry {} {}: {}".format(entry._mse, entry.index, entry.name))
+
 class VBA_Storage:
 
     def __init__(self, vba_project):
@@ -638,7 +689,7 @@ class VBA_Storage:
         if not self._parsed_dir_stream:
             self._parsed_dir_stream = self.vbaProject.parse_dir_stream(self.dir_stream)
         return self._parsed_dir_stream
-    
+
 class vbaProject():
 
     def __init__(self):
@@ -845,6 +896,14 @@ class vbaProject():
                 value = raw_value
             elif ftype == 'UTF-16':
                 value = raw_value.decode('utf-16')
+            elif ftype == 'GUID':
+                logger.debug("GUID: {}".format(hexlify(raw_value)))
+                # uuid = UUID(bytes=raw_value)
+                # value = str(uuid)
+                # value = uuid.bytes_le
+                # value = uuid.hex
+                value = raw_value
+                logger.debug("GUID: {}".format(value))
             elif ftype and callable(ftype):
                 value = ftype(self, raw_value)
             elif len(ftype) == 1:
@@ -1023,10 +1082,30 @@ class vbaProject():
         return Buffer
 
     # MS-OVBA 2.4.2.2
+    def NormalizeStorage(self, storage):
+        logger.debug("Start production of NormalizeStorage(ProjectDesignerStorage)")
+        raise NotImplementedError("Missing NormalizeStorage")
+
+    # MS-OVBA 2.4.2.2
+    def NormalizeDesignerStorage(self, designer_storage):
+        logger.debug("Start production of NormalizeDesignerStorage(ProjectDesignerStorage)")
+        logger.debug("DesignerStorage: {}".format(designer_storage))
+        # TBC: El valor es el nombre del storage. Hay que leer el
+        # storage get_storage
+        TempBuffer = bytearray()
+        TempBufferIndex = 0
+
+        storage = Storage(self.cbf.directory)
+        storage.ls()
+        
+        raise NotImplementedError("Missing NormalizeDesignerStorage")
+
+    
+    # MS-OVBA 2.4.2.2
     def FormsNormalizedData(self):
         logger.debug("Start production of FormsNormalizedData")
         
-        ContentBuffer = bytearray()
+        Buffer = bytearray()
 
         project_info = self.parsed_PROJECT_stream
 
@@ -1035,9 +1114,9 @@ class vbaProject():
             value = property['value']
 
             if name == 'BaseClass':
-                ContentBuffer.extend(self.NormalizeDesignerStorage(value))
+                Buffer.extend(self.NormalizeDesignerStorage(value))
 
-        return ContentBuffer
+        return Buffer
 
     # MS-OVBA 2.4.2.3 Content Hash
     def ContentHash(self, digest_algorithm):
@@ -1170,6 +1249,7 @@ class vbaProject():
 
             if ReferenceRecord['Id']['value'] == 0x002F:
                 # REFERENCECONTROL
+                report_traversed('v3_content_normalized_data', 3, ReferenceRecord['Id']['value'])
                 ReferenceControl = ReferenceRecord
                 Buffer.extend(ReferenceControl['Id']['raw_value'])
                 Buffer.extend(ReferenceControl['SizeOfLibidTwiddled']['raw_value'])
@@ -1201,16 +1281,19 @@ class vbaProject():
                 
             elif ReferenceRecord['Id']['value'] == 0x0033:
                 # REFERENCEORIGINAL
+                report_traversed('v3_content_normalized_data', 3, ReferenceRecord['Id']['value'])
                 ReferenceOriginal = ReferenceRecord
                 Buffer.extend(ReferenceOriginal['Id']['raw_value'])
                 Buffer.extend(ReferenceOriginal['SizeOfLibidOriginal']['raw_value'])
                 # Buffer.extend(ReferenceOriginal['LibidOriginal']['raw_value'])
-                Buffer.extend(self.mbcs_fix_encode(ReferenceOriginal['LibidOriginal']))
+                # Buffer.extend(self.mbcs_fix_encode(ReferenceOriginal['LibidOriginal']))
+                Buffer.extend(ReferenceOriginal['LibidOriginal']['value'])
                 report_buffer("Buffer after 0x0033 REFERENCEORIGINAL")
 
                 
             elif ReferenceRecord['Id']['value'] == 0x000D:
                 # REFERENCEREGISTERED
+                report_traversed('v3_content_normalized_data', 3, ReferenceRecord['Id']['value'])
                 ReferenceRegistered = ReferenceRecord
                 Buffer.extend(ReferenceRegistered['Id']['raw_value'])
                 Buffer.extend(ReferenceRegistered['SizeOfLibid']['raw_value'])
@@ -1224,6 +1307,7 @@ class vbaProject():
 
             elif ReferenceRecord['Id']['value'] == 0x000E:
                 # REFERENCEPROJECT
+                report_traversed('v3_content_normalized_data', 3, ReferenceRecord['Id']['value'])
                 logger.error("Handling 0x000E REFERENCEPROJECT")
                 ReferenceProject = ReferenceRecord
                 Buffer.extend(ReferenceProject['Id']['raw_value'])
@@ -1261,12 +1345,15 @@ class vbaProject():
         for MODULE in PROJECTMODULES['Modules']:
             # MODULE
             if MODULE['TypeRecord']['Id']['value'] == 0x21:
+                report_traversed('v3_content_normalized_data', 3, MODULE['TypeRecord']['Id']['value'])
                 Buffer.extend(MODULE['TypeRecord']['Id']['raw_value'])
                 Buffer.extend(MODULE['TypeRecord']['Reserved']['raw_value'])
             if MODULE['ReadOnlyRecord']:
+                report_traversed('v3_content_normalized_data', 3, MODULE['ReadOnlyRecord']['Id']['value'])
                 Buffer.extend(MODULE['ReadOnlyRecord']['Id']['raw_value'])
                 Buffer.extend(MODULE['ReadOnlyRecord']['Reserved']['raw_value'])
             if MODULE['PrivateRecord']:
+                report_traversed('v3_content_normalized_data', 3, MODULE['PrivateRecord']['Id']['value'])
                 Buffer.extend(MODULE['PrivateRecord']['Id']['raw_value'])
                 Buffer.extend(MODULE['PrivateRecord']['Reserved']['raw_value'])
 
