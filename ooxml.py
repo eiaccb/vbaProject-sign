@@ -4,6 +4,8 @@
 import logging
 logger = logging.getLogger(__name__)
 
+from binascii import hexlify
+
 from opc import OPC
 from vbaProject import vbaProject
 from signature import VbaProjectSignature, SignatureKind
@@ -92,3 +94,22 @@ class OpenXML:
     def contentHash(self, signatureClass, digestAlgorithmOID):
         hash =  signatureClass.contentHash(self.vbaProject, digestAlgorithmOID)
         return hash
+
+    def verify_signatures(self):
+        verified = True
+        for signature_kind, signature in self.vbaProjectSignatures.items():
+            # Hash the signature was computed for
+            signatureHash = signature.signatureHash
+            # Hash of the actual contents computed as needed by this
+            # signature method
+            targetHash = self.contentHash(signature, signature.digestAlgorithmOID).digest()
+            if signatureHash != targetHash:
+                logger.debug("Hash mismatch in signature type {}:".format(signature.kind))
+                logger.debug("In signature: %s" % hexlify(signatureHash))
+                logger.debug("Computed:     %s" % hexlify(targetHash))
+                verified = False
+            else:
+                logger.debug("Hash match in signature type {}:".format(signature.kind))
+
+        return verified
+            
