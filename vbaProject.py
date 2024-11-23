@@ -11,8 +11,12 @@ logger = logging.getLogger(__name__)
 # logger.setLevel(logging.DEBUG)
 from uuid import UUID
 
-import officeparser
-from officeparser import CompoundBinaryFile, decompress_stream
+try:
+    import sys
+    import officeparser
+except:
+    print(sys.path)
+    raise
 
 def setCodePage(project, raw_value):
     value = unpack('<H', raw_value)[0]
@@ -681,7 +685,7 @@ class VBA_Storage:
             dir_stream = self.vbaProject.cbf.find_stream_by_name('dir')
             if dir_stream is None:
                 raise ValueError('missing dir stream')
-            self._dir_stream = decompress_stream(self.vbaProject.cbf.get_stream(dir_stream.index))
+            self._dir_stream = officeparser.decompress_stream(self.vbaProject.cbf.get_stream(dir_stream.index))
         return self._dir_stream
            
     @property
@@ -724,10 +728,10 @@ class vbaProject():
         obj = cls()
         
         if isinstance(source, str):
-            obj.cbf = CompoundBinaryFile(source)
+            obj.cbf = officeparser.CompoundBinaryFile(source)
         elif isinstance(source, bytes):
             data = BytesIO(source)
-            obj.cbf = CompoundBinaryFile(data)
+            obj.cbf = officeparser.CompoundBinaryFile(data)
 
         else:
             logger.error("Error, type is: %s" % type(source))
@@ -1045,7 +1049,7 @@ class vbaProject():
 
             CompressedContainer = module_stream[MODULE['OffsetRecord']['TextOffset']['value']:]
 
-            Text = decompress_stream(CompressedContainer)
+            Text = officeparser.decompress_stream(CompressedContainer)
 
             logger.debug("Module Text: %s (%d bytes)" % (ModuleStreamName, len(Text)))
             logger.debug("Module Text: <%s>" % Text)
@@ -1364,7 +1368,7 @@ class vbaProject():
 
             CompressedContainer = module_stream[MODULE['OffsetRecord']['TextOffset']['value']:]
 
-            Text = decompress_stream(CompressedContainer)
+            Text = officeparser.decompress_stream(CompressedContainer)
 
             logger.debug("Module Text: %s (%d bytes)" % (ModuleStreamName, len(Text)))
             logger.debug("Module Text: <%s>" % Text)
@@ -1595,7 +1599,7 @@ class vbaProject():
                 Buffer.extend(extender)
 
         logger.debug("ProjectNormalizedData: %s" % Buffer)
-        logger.info("Finished ProjectNormalizeData")
+        logger.debug("Finished ProjectNormalizeData")
 
         return Buffer
 
