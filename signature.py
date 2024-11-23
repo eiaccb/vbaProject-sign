@@ -1,6 +1,4 @@
 
-# Bring signature code from original OpenXML.py
-
 # Formats in [MS-OSHARED] https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-oshared/f80ee18c-d72f-4c3c-9ea5-a56f396322e0
 # Handle signatures
 
@@ -68,13 +66,27 @@ import logging
 logger = logging.getLogger(__name__)
 
 from struct import pack, unpack
-from binascii import hexlify
+from binascii import hexlify, unhexlify
 import hashlib
+from enum import Enum
+from cryptography import x509
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.asymmetric.utils import Prehashed
+import asn1
 
 import pkcs7
 
+MD5_OID = x509.ObjectIdentifier('1.2.840.113549.2.5')
+SHA256_OID = x509.ObjectIdentifier('2.16.840.1.101.3.4.2.1')
+SHA512_OID = x509.ObjectIdentifier('2.16.840.1.101.3.4.2.3')
+
 def oid2hashlib(digestAlgorithm):
-    oid = digestAlgorithm.algorithm.dotted_string
+    if isinstance(digestAlgorithm, str):
+        oid = digestAlgorithm
+    elif isinstance(digestAlgorithm, x509.ObjectIdentifier):
+        oid = digestAlgorithm.dotted_string
+    else:
+        oid = digestAlgorithm.algorithm.dotted_string
     if oid == '1.2.840.113549.2.5':
         return hashlib.md5
     elif oid == '2.16.840.1.101.3.4.2.1':
@@ -261,7 +273,7 @@ class WordSigBlob:
 
         signatureInfo = self.signatureInfo.get_block(offset=12)
         cbSigInfo = len(signatureInfo)
-        serializedPointer = 8
+        serializedPointer = 8 
         cch = (cbSigInfo + (cbSigInfo % 2) + 8) / 2
         first_part('<HLL', cch, cbSigInfo, serializedPointer)
         first
@@ -271,8 +283,195 @@ class WordSigBlob:
             padding = b'0x0'
       
         return first_part + signatureInfo + padding
+
+class SpcAttributeTypeAndOptionalValue:
+
+    def __init__(self, type, value=None):
+        self.type = type
+        self.value = value
+
+    def asn1_serialize(self, encoder):
+        encoder.enter(asn1.Numbers.Sequence)
+        encoder.write(self.type.dotted_string, asn1.Numbers.ObjectIdentifier)
+
+        if self.value:
+            # [0] EXPLICIT ANY OPTIONAL
+            encoder.write(self.value, asn1.Numbers.OctetString)
+
+        encoder.leave()
+
+# MS-OSHARED 2.2.2.4.3.2
+class SpcIndirectDataContentV2:
+
+    def __init__(self, data=None, messageDigest=None):
+        self.data = data
+        self.messageDigest = messageDigest
+
+    def asn1_serialize(self, encoder):
+        encoder.enter(asn1.Numbers.Sequence)
+        self.data.asn1_serialize(encoder)
+        self.messageDigest.asn1_serialize(encoder)
+        encoder.leave()
+
+class SigFormatDescriptorV1(pkcs7.ASN1Data):
+    def __init__(self, size=None, version=None, format=None):
+        self.size = size
+        self.version = version
+        self.format = format
+
+    def asn1_serialize(self, encoder):
+        encoder.enter(asn1.Numbers.Sequence)
+        encoder.write(self.size)
+        encoder.write(self.version)
+        encoder.write(self.format)
+        encoder.leave()
+
+    def as_bytes(self):
+        result = pack('<LLL', self.size, self.version, self.format)
+        return result
+
+# MS-OSHARED 2.3.2.4.4.1
+class SpcStatementType:
+
+    def __init__(self, value=None):
+        self._oid = x509.ObjectIdentifier('1.3.6.1.4.1.311.2.1.11')
+        self._statement_types = []
+        if value:
+            if isinstance(value, x509.ObjectIdentifier):
+                self._statement_types.append(value)
+            else:
+                self._statement_types.append(x509.ObjectIdentifier(value))
+
+    # TBC: Implement parse from py-pkcs7
+
+    def asn1_serialize(self, encoder):
+        encoder.enter(asn1.Numbers.Sequence)
+        for s_type in self._statement_types:
+            encoder.write(s_type.dotted_string, asn1.Numbers.ObjectIdentifier)
+        encoder.leave()
     
-from enum import Enum
+# MS-OSHARED 2.3.2.4.4.2
+class SpcSpOpusInfo:
+
+    def __init__(self, program_name=None):
+        self._oid = x509.ObjectIdentifier('1.3.6.1.4.1.311.2.1.11')
+        self._program_name = program_name
+
+    # TBC: Implement parse from py-pkcs7
+
+    def asn1_serialize(self, encoder):
+        encoder.enter(asn1.Numbers.Sequence)
+        encoder.enter(0, asn1.Classes.Context)
+        encoder.write(b'', 0, asn1.Classes.Context)
+        encoder.leave()
+        encoder.leave()
+
+# MS-OSHARED 2.3.2.5.1
+class SerializedCertificateEntry():
+
+    @classmethod
+    def parse(cls, data, offset):
+        self = cls()
+        ( id, encodingType, length ) = unpack('<LLL', data[offset:offset+12])
+        if id != 0x00000020:
+            raise ValueError("Invalid Id value, expecting 0x00000020, found 0x{:8X}".format(id))
+        certbytes = data[offset+12:offset+12+length]
+        self.id = id
+        self.encodingType = encodingType
+        self.length = length
+        self.certbytes = certbytes
+        self.certificate = x509.load_der_x509_certificate(self.certbytes)
+
+        logger.debug("Loaded certificate for {}".format(self.certificate.subject))
+        
+        return self, offset+12+length
+        
+# MS-OSHARED 2.3.2.5.3
+class EndElementMarkerEntry():
+
+    @classmethod
+    def parse(cls, data):
+        id, marker = unpack('<LQ', data)
+
+        self = cls()
+        self.id = id
+        self.marker = marker
+
+        return self
+
+# MS-OSHARED 2.3.2.5.3
+# Note <13>:  [Many Office versions] write properties in the digital certificate store as a byproduct of the way the digital certificate store is constructed, but none of the properties specify any behavior and are ignored when encountered.
+class SerializedPropertyEntry():
+
+    @classmethod
+    def parse(cls, data, offset):
+        self = cls()
+        ( id, encodingType, length ) = unpack('<LLL', data[offset:offset+12])
+        value = data[offset+12:offset+12+length]
+        self.id = id
+        self.encodingType = encodingType
+        self.value = value
+
+        logger.debug("Property: {}".format(hexlify(self.value)))
+
+        return self, offset + 12 + length
+
+# MS-OSHARED 2.3.2.5.4
+class CertStoreCertificateGroup():
+
+    @classmethod
+    def parse(cls, data):
+        logger.debug("Inside CertStoreCertificateGroup.parse")
+        
+        elementList = []
+        offset = 0
+        while True:
+            next_id = unpack('<L', data[offset:offset+4])[0]
+            if next_id == 0x00000020:
+                break
+            element, offset = SerializedPropertyEntry.parse(data, offset)
+            elementList.append(element)
+        serialized_certificate = SerializedCertificateEntry.parse(data, offset)
+        self = cls()
+        self.elementList = elementList
+        self.serialized_certificate = serialized_certificate
+
+        return self
+
+# MS-OSHARED 2.3.2.5.5
+class VBASigSerializedCertStore():
+
+    @classmethod
+    def parse(cls, data):
+        logger.debug("Inside VBASigSerializedCertStore.parse")
+        (
+            version,
+            fileType,
+        ) = unpack('<LL', data[0:8])
+
+        if version != 0:
+            raise ValueError("Invalid version {} for VBASigSerializedCertStore".format(version))
+
+        # IDEA!!!! Resign the sample macros with our certificate so that
+        # data matches better
+        if fileType != 0x54524543:
+            # TREC (CERT backwards, we could have read it as string
+            # but we decoded it as a little-endian logn)
+            raise ValueError("Invalid fileType {} for VBASigSerializedCertStore".format(fileType))
+
+        certGroup = CertStoreCertificateGroup.parse(data[8:-12])
+
+        endMarkerElement = EndElementMarkerEntry.parse(data[-12:])
+
+        self = cls()
+        self.version = version
+        self.fileType = fileType
+        self.certGroup = certGroup
+        self.endMarkerElement = endMarkerElement
+
+        logger.debug("End: VBASigSerializedCertStore.parse version:0x{:08X} fileType:0x{:8X}".format(self.version, self.fileType))
+
+        return self
 
 # class syntax
 
@@ -281,6 +480,20 @@ class SignatureKind(Enum):
     AGILE = 2
     V3 = 3
 
+    def __str__(self):
+        if self == self.LEGACY:
+            return('Legacy')
+        elif self == self.AGILE:
+            return('Agile')
+        elif self == self.V3:
+            return('V3')
+        else:
+            raise ValueError("Bad Kind value {}".format(self))
+
+    @classmethod
+    def choices(cls):
+        return [cls.LEGACY, cls.AGILE, cls.V3]
+    
 sig_offset = 8 # 8 for DigSigBlob, 10 for WordSigBlob
 
 # TODO: Maybe split signature kinds to separate files
@@ -300,6 +513,7 @@ class VbaProjectSignature:
 
     @classmethod
     def get_class(cls, kind):
+        logger.debug("Getting class {}".format(kind))
         if kind == SignatureKind.LEGACY:
             return VbaProjectSignatureLegacy
         elif kind == SignatureKind.AGILE:
@@ -315,18 +529,28 @@ class VbaProjectSignature:
         new_class = cls.get_class(kind)
         self = new_class(ooxml, kind, part_name, part)
 
+        logger.debug("Inside {} VbaProjectSignature.parse".format(kind))
         # Offsets in a DigSigInfoSerialized are relative to an enclosing
         # structure. But the enclosing structure is not present in our case.
         # So we need to tell the extractor about the offset value.
         self.sig_info = DigSigInfoSerialized(part, sig_offset)
+        
         try:
+            open(str(kind) + '-pbSignatureBuffer.bin', 'wb').write(self.sig_info.pbSignatureBuffer)
             self.signature = pkcs7.ContentInfo.parse(data=self.sig_info.pbSignatureBuffer)
         except pkcs7.ASN1Error as e:
-            print('\nError de ASN1:')
-            print("Se esperaba %s" % str(e.args[0]['expected']))
-            print("Se encontró %s" % str(e.args[0]['found']))
+            logger.error('\nError de ASN1:')
+            logger.error("Se esperaba %s" % str(e.args[0]['expected']))
+            logger.error("Se encontró %s" % str(e.args[0]['found']))
             raise
 
+        try:
+            open(str(kind) + '-pbSigningCertStoreBuffer.bin', 'wb').write(self.sig_info.pbSigningCertStoreBuffer)
+            self.certStore = VBASigSerializedCertStore.parse(self.sig_info.pbSigningCertStoreBuffer)
+        except ValueError:
+            logger.error("\nError analyzing pbSigningCertStoreBuffer")
+            raise
+        logger.debug("End: {} VbaProjectSignature.parse".format(kind))
         return self
 
     @property
@@ -341,6 +565,15 @@ class VbaProjectSignature:
         digestInfo = dataContent.messageDigest
         return digestInfo.digestAlgorithm
 
+    @classmethod
+    def digestInfo(cls, vbaProject):
+        digestAlgorithm = cls.requiredDigestAlgorithm()
+        digest = cls.contentHash(vbaProject, digestAlgorithm)
+        di = pkcs7.DigestInfo()
+        di.digestAlgorithm = digestAlgorithm
+        di.digest = digest.digest()
+        return di
+    
 keep_signature_copies = True
 keep_normalized_copies = True
 
@@ -366,6 +599,10 @@ class VbaProjectSignatureLegacy(VbaProjectSignature):
         logger.debug(digestInfo.digest)
 
     @classmethod
+    def requiredDigestAlgorithm(cls):
+        return MD5_OID
+
+    @classmethod
     def contentHash(cls, vbaProject, digestAlgorithmOID):
         # TBC: Remove from vbaProject
         ContentBuffer = bytearray()
@@ -381,13 +618,43 @@ class VbaProjectSignatureLegacy(VbaProjectSignature):
         hash = digest_algorithm(ContentBuffer)
         logger.debug("ContentHash: %s" % hash.hexdigest())
         return hash
-    
+
     @property
     def signatureHash(self):
 
         signedData = self.signature.content
         spcidc = signedData.contentInfo.content
         return spcidc.messageDigest.digest
+
+    @classmethod
+    def get_content(cls, messageDigest):
+
+        encoder = asn1.Encoder()
+
+        encoder.start()
+        encoder.enter(asn1.Numbers.Sequence) # SpcIndirectDataContent
+
+        SpcAttributeTypeAndOptionalValue(
+            x509.ObjectIdentifier('1.3.6.1.4.1.311.2.1.29'),
+            unhexlify('D35C18ABD06431C1FDFFEB811981F45E'),
+        ).asn1_serialize(encoder)
+
+        encoder.enter(asn1.Numbers.Sequence) # DigestInfo
+
+        encoder.enter(asn1.Numbers.Sequence) # AlgorithmIdentifier
+        encoder.write(messageDigest.digestAlgorithm.dotted_string,
+                      asn1.Numbers.ObjectIdentifier)
+        encoder.write(None)
+        encoder.leave()
+        encoder.write(messageDigest.digest, asn1.Numbers.OctetString)
+
+        encoder.leave()                      # DigestInfo
+
+        encoder.leave()                      # SpcIndirectDataContent 
+
+        content = encoder.output()
+
+        return content
 
 class VbaProjectSignatureAgile(VbaProjectSignature):
 
@@ -409,6 +676,10 @@ class VbaProjectSignatureAgile(VbaProjectSignature):
         digestInfo = dataContent.messageDigest
         logger.debug(digestInfo.digestAlgorithm)
         logger.debug(digestInfo.digest)
+
+    @classmethod
+    def requiredDigestAlgorithm(cls):
+        return SHA256_OID
 
     @classmethod
     def contentHash(cls, vbaProject, digestAlgorithmOID):
@@ -441,7 +712,32 @@ class VbaProjectSignatureAgile(VbaProjectSignature):
         # return spcidc.messageDigest.digest
         return spcidc.messageDigest.digest_parsed.sourceHash
 
-class VbaProjectSignatureV3(VbaProjectSignature):
+    @classmethod
+    def get_content(cls, messageDigest):
+
+        encoder = asn1.Encoder()
+        encoder.start()
+
+        struct_size = 12 # What is this?
+        format_descriptor = SigFormatDescriptorV1(
+            struct_size, 1, 1
+        ).as_bytes()
+
+        spcAttributeTypeAndOptionalValue = SpcAttributeTypeAndOptionalValue(
+            type=x509.ObjectIdentifier('1.3.6.1.4.1.311.2.1.31'),
+            value=format_descriptor,
+        )
+        
+        SpcIndirectDataContentV2(
+            data=spcAttributeTypeAndOptionalValue,
+            messageDigest=messageDigest,
+        ).asn1_serialize(encoder)
+
+        content = encoder.output()
+
+        return content
+
+class VbaProjectSigesatureV3(VbaProjectSignature):
 
     def analyze(self):
         if keep_signature_copies:
@@ -461,6 +757,10 @@ class VbaProjectSignatureV3(VbaProjectSignature):
         digestInfo = dataContent.messageDigest
         logger.debug(digestInfo.digestAlgorithm)
         logger.debug(digestInfo.digest)
+
+    @classmethod
+    def requiredDigestAlgorithm(cls):
+        return SHA512_OID
 
     @classmethod
     def contentHash(cls, vbaProject, digestAlgorithmOID):
@@ -493,3 +793,72 @@ class VbaProjectSignatureV3(VbaProjectSignature):
         spcidc = signedData.contentInfo.content
         # return spcidc.messageDigest.digest
         return spcidc.messageDigest.digest_parsed.sourceHash
+
+class VbaProjectSignatureBuilder:
+
+    def __init__(self, kind):
+        self.kind = kind
+
+    def set_vbaProject(self, project):
+        self.vbaProject = project
+        return self
+
+    def set_certificates(self, certificates):
+        self.signer_certificate = certificates[0]
+        self.other_certificates = certificates[1:]
+        return self
+
+    def sign(self, signer_engine):
+        sig_cls = VbaProjectSignature.get_class(self.kind)
+        # contentHash = sig_cls.contentHash(self.vbaProject)
+        messageDigest = sig_cls.digestInfo(self.vbaProject)
+        
+        contentType = x509.ObjectIdentifier('1.3.6.1.4.1.311.2.1.4')
+
+        content = sig_cls.get_content(messageDigest)
+
+        encoder = asn1.Encoder()
+        encoder.start()
+        
+        pkcs7_builder = pkcs7.SignedDataBuilder()
+        signer_engine.set_digest_algorithm(sig_cls.requiredDigestAlgorithm())
+
+        # Attributes is composed of sequences. Each sequence is composed
+        # of an OID and a set of values
+        # The order we have found is:
+        # 1.3.6.1.4.1.311.2.1.12 SPC_SP_OPUS_INFO_OBJID (microsoft)
+        # 1.2.840.113549.1.9.3 contentType with value 1.3.6.1.4.1.311.2.1.4
+        # 1.3.6.1.4.1.311.2.1.11 SPC_STATEMENT_TYPE_OBJID with value Microsoft Individual Code Signing (parece que 1.3.6.1.4.1.311.2.1.21)
+        # 1.2.840.113549.1.9.4 messageDigest with a value (should match the one computed as ContentHash)
+        # pkcs7_builder.add_authenticated_attribute(
+        #    '1.3.6.1.4.1.311.2.1.12', 
+        # )
+        pkcs7_builder.add_authenticated_attribute(
+            oid=x509.ObjectIdentifier('1.3.6.1.4.1.311.2.1.12'),
+            values=[SpcSpOpusInfo()])
+        pkcs7_builder.add_authenticated_attribute(
+            oid=x509.ObjectIdentifier('1.2.840.113549.1.9.3'),
+            values=[pkcs7.PKCS9_ContentType('1.3.6.1.4.1.311.2.1.4')])
+        pkcs7_builder.add_authenticated_attribute(
+            oid=x509.ObjectIdentifier('1.3.6.1.4.1.311.2.1.11'),
+            values=[SpcStatementType('1.3.6.1.4.1.311.2.1.21')])
+        pkcs7_builder.add_authenticated_attribute(
+            oid=x509.ObjectIdentifier('1.2.840.113549.1.9.4'),
+            values=[pkcs7.PKCS9_MessageDigest(messageDigest)])
+        pkcs7_builder.add_content(contentType, content)
+        pkcs7_builder.add_signer(self.signer_certificate)
+        pkcs7_builder.add_digest_algorithm(sig_cls.requiredDigestAlgorithm())
+        for certificate in self.other_certificates:
+            pkcs7_builder.add_extra_certificate(certificate)
+        pkcs7_builder.set_signer_engine(signer_engine)
+        
+        dsis = DigSigInfoSerialized()
+
+        pbSignatureBuffer = pkcs7_builder.output(format='DER')
+        open("{}-SignatureResult.p7b".format(self.kind),'wb').write(pbSignatureBuffer)
+        dsis.pbSignatureBuffer = pbSignatureBuffer
+
+        # TBC:
+        # return dsis.serialize()
+        return dsis.pbSignatureBuffer
+
