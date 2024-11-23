@@ -8,7 +8,7 @@ from binascii import hexlify
 
 from opc import OPC
 from vbaProject import vbaProject
-from signature import VbaProjectSignature, SignatureKind
+from signature import VbaProjectSignature, SignatureKind, VbaProjectSignatureBuilder
 
 class OpenXML:
 
@@ -113,3 +113,20 @@ class OpenXML:
 
         return verified
             
+    def sign_macros(self, certificates, signer_engine):
+        for kind in SignatureKind.choices():
+            sig_cls = VbaProjectSignature.get_class(kind)
+            builder = VbaProjectSignatureBuilder(
+                kind
+            ).set_vbaProject(
+                self.vbaProject
+            ).set_certificates(
+                certificates
+            )
+
+            sig = builder.sign(signer_engine)
+            self.vbaProjectSignatures[kind] = sig
+
+    #def save(self, output_filename):
+    # Fill OPC data and write
+        
