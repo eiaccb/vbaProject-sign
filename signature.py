@@ -330,6 +330,35 @@ class SigFormatDescriptorV1(pkcs7.ASN1Data):
         result = pack('<LLL', self.size, self.version, self.format)
         return result
 
+class SigDataV1Serialized :
+    def __init__(self, algorithmId, compiledHash, sourceHash):
+        self.algorithmId = algorithmId
+        self.compiledHash = compiledHash
+        self.sourceHash = sourceHash
+
+    def as_bytes(self):
+        # Don't miss this, a null-terminated dotted string
+        algorithmId = self.algorithmId.algorithm.dotted_string.encode('ascii') + b'\0'
+        algorithmIdSize = len(algorithmId)
+        # Forced here for debugging purposes
+        compiledHash = unhexlify('2A32CDC306490311AAC4EF27E22A9B62D21F1788238D17DF96DE4082D029E716')
+        ALGORITHMIDSIZE = len(algorithmId)
+        compiledHashSize = len(compiledHash)
+        sourceHashSize = len(self.sourceHash)
+
+        first_part = pack(
+            '<LLLLLL',
+            algorithmIdSize,
+            compiledHashSize,
+            sourceHashSize,
+            24,
+            24 + algorithmIdSize,
+            24 + algorithmIdSize + compiledHashSize
+        )
+
+        result = first_part + algorithmId + compiledHash + self.sourceHash
+        return result
+
 # MS-OSHARED 2.3.2.4.4.1
 class SpcStatementType:
 
@@ -565,15 +594,6 @@ class VbaProjectSignature:
         digestInfo = dataContent.messageDigest
         return digestInfo.digestAlgorithm
 
-    @classmethod
-    def digestInfo(cls, vbaProject):
-        digestAlgorithm = cls.requiredDigestAlgorithm()
-        digest = cls.contentHash(vbaProject, digestAlgorithm)
-        di = pkcs7.DigestInfo()
-        di.digestAlgorithm = digestAlgorithm
-        di.digest = digest.digest()
-        return di
-    
 keep_signature_copies = True
 keep_normalized_copies = True
 
@@ -642,7 +662,7 @@ class VbaProjectSignatureLegacy(VbaProjectSignature):
         encoder.enter(asn1.Numbers.Sequence) # DigestInfo
 
         encoder.enter(asn1.Numbers.Sequence) # AlgorithmIdentifier
-        encoder.write(messageDigest.digestAlgorithm.dotted_string,
+        encoder.write(messageDigest.digestAlgorithm.algorithm.dotted_string,
                       asn1.Numbers.ObjectIdentifier)
         encoder.write(None)
         encoder.leave()
@@ -713,15 +733,27 @@ class VbaProjectSignatureAgile(VbaProjectSignature):
         return spcidc.messageDigest.digest_parsed.sourceHash
 
     @classmethod
-    def get_content(cls, messageDigest):
+    def get_content(cls, inputMessageDigest):
 
         encoder = asn1.Encoder()
         encoder.start()
 
+        # Documentation states this must ba a DER encoding,
+        # Our samples just encode the three long integers one after
+        # the other in little endian format
         struct_size = 12 # What is this?
         format_descriptor = SigFormatDescriptorV1(
             struct_size, 1, 1
         ).as_bytes()
+
+        digest = SigDataV1Serialized(
+            inputMessageDigest.digestAlgorithm,
+            b'',
+            inputMessageDigest.digest).as_bytes()
+
+        messageDigest = pkcs7.DigestInfo(
+            inputMessageDigest.digestAlgorithm,
+            digest)
 
         spcAttributeTypeAndOptionalValue = SpcAttributeTypeAndOptionalValue(
             type=x509.ObjectIdentifier('1.3.6.1.4.1.311.2.1.31'),
@@ -737,7 +769,7 @@ class VbaProjectSignatureAgile(VbaProjectSignature):
 
         return content
 
-class VbaProjectSigesatureV3(VbaProjectSignature):
+class VbaProjectSignatureV3(VbaProjectSignature):
 
     def analyze(self):
         if keep_signature_copies:
@@ -760,7 +792,9 @@ class VbaProjectSigesatureV3(VbaProjectSignature):
 
     @classmethod
     def requiredDigestAlgorithm(cls):
-        return SHA512_OID
+        # TBC: Temporary change for testing
+        # return SHA512_OID
+        return SHA256_OID
 
     @classmethod
     def contentHash(cls, vbaProject, digestAlgorithmOID):
@@ -794,6 +828,43 @@ class VbaProjectSigesatureV3(VbaProjectSignature):
         # return spcidc.messageDigest.digest
         return spcidc.messageDigest.digest_parsed.sourceHash
 
+    @classmethod
+    def get_content(cls, inputMessageDigest):
+
+        encoder = asn1.Encoder()
+        encoder.start()
+
+        # Documentation states this must ba a DER encoding,
+        # Our samples just encode the three long integers one after
+        # the other in little endian format
+        struct_size = 12 # What is this?
+        format_descriptor = SigFormatDescriptorV1(
+            struct_size, 1, 1
+        ).as_bytes()
+
+        digest = SigDataV1Serialized(
+            inputMessageDigest.digestAlgorithm,
+            b'',
+            inputMessageDigest.digest).as_bytes()
+
+        messageDigest = pkcs7.DigestInfo(
+            inputMessageDigest.digestAlgorithm,
+            digest)
+
+        spcAttributeTypeAndOptionalValue = SpcAttributeTypeAndOptionalValue(
+            type=x509.ObjectIdentifier('1.3.6.1.4.1.311.2.1.31'),
+            value=format_descriptor,
+        )
+        
+        SpcIndirectDataContentV2(
+            data=spcAttributeTypeAndOptionalValue,
+            messageDigest=messageDigest,
+        ).asn1_serialize(encoder)
+
+        content = encoder.output()
+
+        return content
+
 class VbaProjectSignatureBuilder:
 
     def __init__(self, kind):
@@ -810,15 +881,33 @@ class VbaProjectSignatureBuilder:
 
     def sign(self, signer_engine):
         sig_cls = VbaProjectSignature.get_class(self.kind)
-        # contentHash = sig_cls.contentHash(self.vbaProject)
-        messageDigest = sig_cls.digestInfo(self.vbaProject)
-        
+
+        digestAlgorithm = sig_cls.requiredDigestAlgorithm()
+        digest = sig_cls.contentHash(self.vbaProject, digestAlgorithm).digest()
+        messageDigest = pkcs7.DigestInfo(
+            pkcs7.DigestAlgorithmIdentifier(digestAlgorithm),
+            digest
+        )
+
         contentType = x509.ObjectIdentifier('1.3.6.1.4.1.311.2.1.4')
 
-        content = sig_cls.get_content(messageDigest)
+        logger.debug("TEST: messageDigest:        {}".format(hexlify(messageDigest.digest)))
 
-        encoder = asn1.Encoder()
-        encoder.start()
+        content = sig_cls.get_content(messageDigest)
+        # Please see RFC2315, 9.3 Message-digesting process
+        # Only the contents octets of the DER encoding of that field are
+        # digested, not the identifier octets or the length octets.
+        hash_function = oid2hashlib(messageDigest.digestAlgorithm)
+        decoder = asn1.Decoder()
+        decoder.start(content)
+        content_tag, content_value = decoder.read()
+        logger.debug("TEST: content to hash:      {}".format(hexlify(content_value)))
+        hash_value = hash_function(content_value).digest()
+        logger.debug("TEST: content hash to sign: {}".format(hexlify(hash_value)))
+        new_messageDigest = pkcs7.DigestInfo(
+            messageDigest.digestAlgorithm,
+            hash_value
+        )
         
         pkcs7_builder = pkcs7.SignedDataBuilder()
         signer_engine.set_digest_algorithm(sig_cls.requiredDigestAlgorithm())
@@ -844,7 +933,7 @@ class VbaProjectSignatureBuilder:
             values=[SpcStatementType('1.3.6.1.4.1.311.2.1.21')])
         pkcs7_builder.add_authenticated_attribute(
             oid=x509.ObjectIdentifier('1.2.840.113549.1.9.4'),
-            values=[pkcs7.PKCS9_MessageDigest(messageDigest)])
+            values=[pkcs7.PKCS9_MessageDigest(new_messageDigest)])
         pkcs7_builder.add_content(contentType, content)
         pkcs7_builder.add_signer(self.signer_certificate)
         pkcs7_builder.add_digest_algorithm(sig_cls.requiredDigestAlgorithm())
@@ -853,7 +942,7 @@ class VbaProjectSignatureBuilder:
         pkcs7_builder.set_signer_engine(signer_engine)
         
         dsis = DigSigInfoSerialized()
-
+        
         pbSignatureBuffer = pkcs7_builder.output(format='DER')
         open("{}-SignatureResult.p7b".format(self.kind),'wb').write(pbSignatureBuffer)
         dsis.pbSignatureBuffer = pbSignatureBuffer
