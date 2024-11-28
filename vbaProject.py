@@ -11,6 +11,9 @@ logger = logging.getLogger(__name__)
 # logger.setLevel(logging.DEBUG)
 from uuid import UUID
 
+class KnownBug(Exception):
+    pass
+
 try:
     import sys
     import officeparser
@@ -1293,7 +1296,7 @@ class vbaProject():
                 # Buffer.extend(self.mbcs_fix_encode(ReferenceOriginal['LibidOriginal']))
                 Buffer.extend(ReferenceOriginal['LibidOriginal']['value'])
                 report_buffer("Buffer after 0x0033 REFERENCEORIGINAL")
-
+                raise KnownBug("Found ReferenceOriginal 0x0033, current implementation does not handle it well")
                 
             elif ReferenceRecord['Id']['value'] == 0x000D:
                 # REFERENCEREGISTERED

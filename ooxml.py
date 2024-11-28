@@ -1,5 +1,5 @@
 
-# Handle an MS Office file of the Office OpenXML variety
+# Handle an MS Office file of the OfficeOpenXML variety
 
 import logging
 logger = logging.getLogger(__name__)
@@ -10,12 +10,12 @@ from opc import OPC
 from vbaProject import vbaProject
 from signature import VbaProjectSignature, SignatureKind, VbaProjectSignatureBuilder
 
-class OpenXML:
+class OfficeOpenXML:
 
     @classmethod
-    def __init__(self, input=None):
+    def __init__(self, input=None, mode='r'):
 
-        self.opc = OPC(input)
+        self.opc = OPC(input, mode=mode)
 
         parts = self.opc.find('application/vnd.ms-office.vbaProject')
         logging.debug("{} vbaProject part(s) found".format(len(parts)))
@@ -113,9 +113,10 @@ class OpenXML:
 
         return verified
             
-    def sign_macros(self, certificates, signer_engine):
+    def sign_macros(self, certificates, signer_engine, output_filename=None):
+        logger.debug("In sign_macros")
+        sigs = []
         for kind in SignatureKind.choices():
-            sig_cls = VbaProjectSignature.get_class(kind)
             builder = VbaProjectSignatureBuilder(
                 kind
             ).set_vbaProject(
@@ -125,8 +126,24 @@ class OpenXML:
             )
 
             sig = builder.sign(signer_engine)
-            self.vbaProjectSignatures[kind] = sig
+            if sig:
+                if kind == SignatureKind.LEGACY:
+                    part_name = 'xl/vbaProjectSignature.bin'
+                    mime_type = 'application/vnd.ms-office.vbaProjectSignature'
+                elif kind == SignatureKind.AGILE:
+                    part_name = 'xl/vbaProjectSignatureAgile.bin'
+                    mime_type = 'application/vnd.ms-office.vbaProjectSignatureAgile'
+                elif kind == SignatureKind.V3:
+                    part_name = 'xl/vbaProjectSignatureV3.bin'
+                    mime_type = 'application/vnd.ms-office.vbaProjectSignatureV3'
+                else:
+                    raise UnimplementedError("Invalid signature type {}".format(kind))
+                logger.debug("Adding name {} with type {}".format(part_name, mime_type))
+                sigs.append((kind, sig, part_name, mime_type))
 
-    #def save(self, output_filename):
+        self.opc.update_signatures(sigs, output_filename)
+
+    def save(self, output_filename):
+        data = self.opc.save(output_filename)
     # Fill OPC data and write
         

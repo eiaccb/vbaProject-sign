@@ -70,11 +70,24 @@ from binascii import hexlify, unhexlify
 import hashlib
 from enum import Enum
 from cryptography import x509
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.utils import Prehashed
 import asn1
 
+import vbaProject
 import pkcs7
+
+debug_info = {
+    'debugging': True,
+    'keep_files': True,
+    'properties': [
+        (0x0000000f,
+         unhexlify('08760cfe7dae8dec5fdeea8af4e05ee04e5f7e9226525aa92f5e755e3597ca08'))
+    ],
+    'SigDataV1Serialized-compiledHash': unhexlify('2A32CDC306490311AAC4EF27E22A9B62D21F1788238D17DF96DE4082D029E716'),
+   
+}
 
 MD5_OID = x509.ObjectIdentifier('1.2.840.113549.2.5')
 SHA256_OID = x509.ObjectIdentifier('2.16.840.1.101.3.4.2.1')
@@ -143,16 +156,21 @@ class DigSigInfoSerialized:
             self._initialized = False
             self.pbSignatureBuffer = None
             self.pbSigningCertStoreBuffer = None
-            self.rgchProjectNameBuffer = None
-            self.rgchTimestampBuffer = None
+            self.rgchProjectNameBuffer = unhexlify('0000')
+            self.rgchTimestampBuffer = unhexlify('0000')
 
-    def get_block(self, offset=None):
+    def as_bytes(self, offset=None):
+        if self.pbSignatureBuffer and self.pbSigningCertStoreBuffer:
+            self._initialized = True
         if not self._initialized:
             raise ValueError("Instance of DigSigInfoSerialized is not initialized")
 
         if offset is None:
             offset = self.offset
 
+        # Nine longs in the first part
+        offset += 9 * 4
+    
         cbSignature = len(self.pbSignatureBuffer)
         signatureOffset = offset
         offset += cbSignature
@@ -161,13 +179,21 @@ class DigSigInfoSerialized:
         certStoreOffset = offset
         offset += cbSigningCertStore
 
-        cbProjectName = len(self.rgchProjectNameBuffer)
+        if self.rgchProjectNameBuffer:
+            projectName = self.rgchProjectNameBuffer
+        else:
+            projectName = unhexlify('0000')
+        cbProjectName = len(projectName)
         projectNameOffset = offset
         offset += cbProjectName
 
         fTimestamp = 0
 
-        cbTimestampUrl = len(self.rgchTimestampBuffer)
+        if self.rgchTimestampBuffer:
+            timestamp = self.rgchTimestampBuffer
+        else:
+            timestamp = unhexlify('0000')
+        cbTimestampUrl = len(timestamp)
         timestampUrlOffset = offset
         offset += cbTimestampUrl
 
@@ -176,13 +202,13 @@ class DigSigInfoSerialized:
                           signatureOffset,
                           cbSigningCertStore,
                           certStoreOffset,
-                          cbProjectName,
+                          cbProjectName - 2,
                           projectNameOffset,
                           fTimestamp,
-                          cbTimestampUrl,
+                          cbTimestampUrl - 2,
                           timestampUrlOffset,)
 
-        return first_part + self.pbSignatureBuffer + self.pbSigningCertStoreBuffer + self.rgchProjectNameBuffer + self.rgchTimestampBuffer
+        return first_part + self.pbSignatureBuffer + self.pbSigningCertStoreBuffer + projectName + timestamp
 
 # Sometimes the DigSigInfoSerialized struct is contained in one of these:
 # DigSigBlob or WordSigBlob
@@ -340,9 +366,11 @@ class SigDataV1Serialized :
         # Don't miss this, a null-terminated dotted string
         algorithmId = self.algorithmId.algorithm.dotted_string.encode('ascii') + b'\0'
         algorithmIdSize = len(algorithmId)
-        # Forced here for debugging purposes
-        compiledHash = unhexlify('2A32CDC306490311AAC4EF27E22A9B62D21F1788238D17DF96DE4082D029E716')
-        ALGORITHMIDSIZE = len(algorithmId)
+        if debug_info['debugging'] and 'SigDataV1Serialized-compiledHash' in debug_info:
+            compiledHash = debug_info['SigDataV1Serialized-compiledHash']
+        else:
+            compiledHash = b''
+        algorithmIdSize = len(algorithmId)
         compiledHashSize = len(compiledHash)
         sourceHashSize = len(self.sourceHash)
 
@@ -398,6 +426,9 @@ class SpcSpOpusInfo:
 # MS-OSHARED 2.3.2.5.1
 class SerializedCertificateEntry():
 
+    def __init__(self, certificate=None):
+        self.certificate = certificate
+        
     @classmethod
     def parse(cls, data, offset):
         self = cls()
@@ -414,7 +445,12 @@ class SerializedCertificateEntry():
         logger.debug("Loaded certificate for {}".format(self.certificate.subject))
         
         return self, offset+12+length
-        
+
+    def as_bytes(self):
+        cert_bytes = self.certificate.public_bytes(serialization.Encoding.DER)
+        first_part = pack('<LLL', 0x00000020, 0x00000001, len(cert_bytes))
+        return first_part + cert_bytes
+
 # MS-OSHARED 2.3.2.5.3
 class EndElementMarkerEntry():
 
@@ -428,25 +464,50 @@ class EndElementMarkerEntry():
 
         return self
 
+    def as_bytes(self):
+        result = pack('<LQ', 0x00000000, 0x0000000000000000)
+        return result
+
 # MS-OSHARED 2.3.2.5.3
 # Note <13>:  [Many Office versions] write properties in the digital certificate store as a byproduct of the way the digital certificate store is constructed, but none of the properties specify any behavior and are ignored when encountered.
 class SerializedPropertyEntry():
 
-    @classmethod
-    def parse(cls, data, offset):
-        self = cls()
-        ( id, encodingType, length ) = unpack('<LLL', data[offset:offset+12])
-        value = data[offset+12:offset+12+length]
+    def __init__(self, id=None, encodingType=0x00000001, value=None):
         self.id = id
         self.encodingType = encodingType
         self.value = value
+
+    @classmethod
+    def parse(cls, data, offset):
+
+        ( id, encodingType, length ) = unpack('<LLL', data[offset:offset+12])
+        value = data[offset+12:offset+12+length]
+        self = cls(id=id, encodingType=encodingType, value=value)
 
         logger.debug("Property: {}".format(hexlify(self.value)))
 
         return self, offset + 12 + length
 
+    def as_bytes(self):
+        first_part = pack('<LLL', self.id, self.encodingType, len(self.value))
+        return first_part + self.value
+
 # MS-OSHARED 2.3.2.5.4
 class CertStoreCertificateGroup():
+
+    def __init__(self, elementList=[], certificate=None):
+        self.elementList = elementList
+        if debug_info['debugging']:
+            self.elementList = []
+            for e in debug_info['properties']:
+                id, value = e
+                e = SerializedPropertyEntry(id=id, value=value)
+                self.elementList.append(e)
+        
+        if certificate:
+            self.serialized_certificate = SerializedCertificateEntry(certificate)
+        else:
+            self.serialized_certificate = None
 
     @classmethod
     def parse(cls, data):
@@ -467,8 +528,26 @@ class CertStoreCertificateGroup():
 
         return self
 
+    def as_bytes(self):
+        parts = []
+        for element in self.elementList:
+            parts.append(element.as_bytes())
+        parts.append(self.serialized_certificate.as_bytes())
+        return b''.join(parts)
+
 # MS-OSHARED 2.3.2.5.5
 class VBASigSerializedCertStore():
+
+    def __init__(self, version=0, fileType=0x54524543, certGroup=None, certificate=None):
+        self.version = version
+        self.fileType = fileType
+        self.certGroup = certGroup
+        self.certificate = certificate
+
+        if not certGroup and self.certificate:
+            self.certGroup = CertStoreCertificateGroup(certificate=self.certificate)
+
+        self.endMarkerElement = None
 
     @classmethod
     def parse(cls, data):
@@ -501,6 +580,15 @@ class VBASigSerializedCertStore():
         logger.debug("End: VBASigSerializedCertStore.parse version:0x{:08X} fileType:0x{:8X}".format(self.version, self.fileType))
 
         return self
+
+    def as_bytes(self):
+        first_part = pack('<LL', self.version, self.fileType)
+        certGroup = self.certGroup.as_bytes()
+        if not self.endMarkerElement:
+            self.endMarkerElement = EndElementMarkerEntry()
+        endMarkerElement = self.endMarkerElement.as_bytes()
+
+        return first_part + certGroup + endMarkerElement
 
 # class syntax
 
@@ -554,7 +642,9 @@ class VbaProjectSignature:
     
     @classmethod
     def parse(cls, ooxml, kind, part_name, part):
-        # We ignore class
+        if debug_info['debugging'] and debug_info['keep_files']:
+            open(str(kind) + '-input-DigSigInfoSerialized.bin', 'wb').write(part)
+        # We ignore cls
         new_class = cls.get_class(kind)
         self = new_class(ooxml, kind, part_name, part)
 
@@ -565,7 +655,8 @@ class VbaProjectSignature:
         self.sig_info = DigSigInfoSerialized(part, sig_offset)
         
         try:
-            open(str(kind) + '-pbSignatureBuffer.bin', 'wb').write(self.sig_info.pbSignatureBuffer)
+            if debug_info['debugging'] and debug_info['keep_files']:
+                open(str(kind) + '-input-pbSignatureBuffer.bin', 'wb').write(self.sig_info.pbSignatureBuffer)
             self.signature = pkcs7.ContentInfo.parse(data=self.sig_info.pbSignatureBuffer)
         except pkcs7.ASN1Error as e:
             logger.error('\nError de ASN1:')
@@ -574,7 +665,8 @@ class VbaProjectSignature:
             raise
 
         try:
-            open(str(kind) + '-pbSigningCertStoreBuffer.bin', 'wb').write(self.sig_info.pbSigningCertStoreBuffer)
+            if debug_info['debugging'] and debug_info['keep_files']:
+                open(str(kind) + '-input-pbSigningCertStoreBuffer.bin', 'wb').write(self.sig_info.pbSigningCertStoreBuffer)
             self.certStore = VBASigSerializedCertStore.parse(self.sig_info.pbSigningCertStoreBuffer)
         except ValueError:
             logger.error("\nError analyzing pbSigningCertStoreBuffer")
@@ -600,7 +692,7 @@ keep_normalized_copies = True
 class VbaProjectSignatureLegacy(VbaProjectSignature):
 
     def analyze(self):
-        if keep_signature_copies:
+        if debug_info['debugging'] and debug_info['keep_files']:
             open('sig_legacy.p7b', 'wb').write(self.sig_info.pbSignatureBuffer)
 
         logger.info(self.signature)
@@ -632,7 +724,7 @@ class VbaProjectSignatureLegacy(VbaProjectSignature):
         logger.info("ContentNormalizedData: %s" % hexlify(ContentNormalizedData))
         ContentBuffer.extend(ContentNormalizedData)
 
-        if keep_normalized_copies:
+        if debug_info['debugging'] and debug_info['keep_files']:
             open("NormalizedData.bin", "wb").write(ContentBuffer)
         digest_algorithm = oid2hashlib(digestAlgorithmOID)
         hash = digest_algorithm(ContentBuffer)
@@ -679,7 +771,7 @@ class VbaProjectSignatureLegacy(VbaProjectSignature):
 class VbaProjectSignatureAgile(VbaProjectSignature):
 
     def analyze(self):
-        if keep_signature_copies:
+        if debug_info['debugging'] and debug_info['keep_files']:
             open('sig_agile.p7b', 'wb').write(self.sig_info.pbSignatureBuffer)
 
         logger.info(self.signature)
@@ -717,7 +809,7 @@ class VbaProjectSignatureAgile(VbaProjectSignature):
         logger.info("FormsNormalizedData: %s" % hexlify(FormsNormalizedData))
         ContentBuffer.extend(FormsNormalizedData)
 
-        if keep_normalized_copies:
+        if debug_info['debugging'] and debug_info['keep_files']:
             open("AgileNormalizedData.bin", "wb").write(ContentBuffer)
 
         digest_algorithm = oid2hashlib(digestAlgorithmOID)
@@ -772,7 +864,7 @@ class VbaProjectSignatureAgile(VbaProjectSignature):
 class VbaProjectSignatureV3(VbaProjectSignature):
 
     def analyze(self):
-        if keep_signature_copies:
+        if debug_info['debugging'] and debug_info['keep_files']:
             open('sig_v3.p7b', 'wb').write(self.sig_info.pbSignatureBuffer)
 
         logger.info(self.signature)
@@ -811,9 +903,7 @@ class VbaProjectSignatureV3(VbaProjectSignature):
         logger.debug("ProjectNormalizedData: %s" % hexlify(ProjectNormalizedData))
         ContentBuffer.extend(ProjectNormalizedData)
 
-        open("V3NormalizedData.bin", "wb").write(ContentBuffer)
-
-        if keep_normalized_copies:
+        if debug_info['debugging'] and debug_info['keep_files']:
             open("V3NormalizedData.bin", "wb").write(ContentBuffer)
 
         digest_algorithm = oid2hashlib(digestAlgorithmOID)
@@ -883,7 +973,11 @@ class VbaProjectSignatureBuilder:
         sig_cls = VbaProjectSignature.get_class(self.kind)
 
         digestAlgorithm = sig_cls.requiredDigestAlgorithm()
-        digest = sig_cls.contentHash(self.vbaProject, digestAlgorithm).digest()
+        try:
+            digest = sig_cls.contentHash(self.vbaProject, digestAlgorithm).digest()
+        except vbaProject.KnownBug as e:
+            logger.error(e)
+            return None
         messageDigest = pkcs7.DigestInfo(
             pkcs7.DigestAlgorithmIdentifier(digestAlgorithm),
             digest
@@ -943,11 +1037,16 @@ class VbaProjectSignatureBuilder:
         
         dsis = DigSigInfoSerialized()
         
-        pbSignatureBuffer = pkcs7_builder.output(format='DER')
-        open("{}-SignatureResult.p7b".format(self.kind),'wb').write(pbSignatureBuffer)
-        dsis.pbSignatureBuffer = pbSignatureBuffer
+        sig_bytes = pkcs7_builder.output(format='DER')
+        dsis.pbSignatureBuffer = sig_bytes
 
-        # TBC:
-        # return dsis.serialize()
-        return dsis.pbSignatureBuffer
+        certStore_bytes = VBASigSerializedCertStore(certificate=self.signer_certificate).as_bytes()
+        dsis.pbSigningCertStoreBuffer = certStore_bytes
 
+        dsis_bytes = dsis.as_bytes(offset=8)
+        if debug_info['debugging'] and debug_info['keep_files']:
+            open("{}-SignatureResult.p7b".format(self.kind),'wb').write(sig_bytes)
+            open("{}-VBASigSerializedCertStore.bin".format(self.kind),'wb').write(certStore_bytes)
+            open("{}-DigSigInfoSerialized.bin".format(self.kind),'wb').write(dsis_bytes)
+
+        return dsis_bytes

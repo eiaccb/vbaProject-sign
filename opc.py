@@ -6,29 +6,55 @@
 import logging
 logger = logging.getLogger(__name__)
 
+import os
 import zipfile
 from io import BytesIO
+import tempfile
+import re
 from lxml import etree
 
 class OPC:
 
-    def __init__(self, input=None):
+    def __init__(self, input=None, mode='r', extension='.zip'):
 
         self.file = None
+        self.path = None
+        self.original_path = None
+        self.mode = mode
+        self.extension = extension
         self.zipfile = None
         self._default_media_types = dict()
         self._media_types = dict()
         self.parts = dict()
+        self.changes_pending = []
         
+        # For now, we will try not to modify in place
+        # In any case, we need an actual file to make changes
+        # Apparently`python zipfile cannot do the whole process
+        # in memory
         if input:
+            logger.debug("Input is {}".format(input))
             if hasattr(input, 'read'):
                 self.file = input
             elif isinstance(input, bytes):
                 self.file = BytesIO(input)
             elif isinstance(input, str):
-                self.file= open(input, 'rb')
+                self.original_path = input
+                basename, extension = os.path.splitext(input)
+                self.extension = extension
+                self.path = self.original_path
+                self.file= open(self.path, 'rb')
             else:
                 raise ValueError("Input is unsupported %s" % type(input))
+            if self.mode != 'r':
+                original_file = self.file
+                self.file = tempfile.NamedTemporaryFile(
+                    suffix=self.extension, delete=False)
+                self.path = self.file.name
+                logger.debug("Temporary file is {}".format(self.path))
+                # Chunk it in the future
+                self.file.write(original_file.read())
+                self.file.seek(0)
             self.parse()
         else:
             self.file = None
@@ -37,7 +63,10 @@ class OPC:
 
         # We only support OPC as a ZIP file (the standard
         try:
-            self.zipfile = zipfile.ZipFile(self.file)
+            self.zipfile = zipfile.ZipFile(
+                self.file,
+                compression=zipfile.ZIP_DEFLATED,
+                mode=self.mode)
         except zipfile.BadZipFile:
             raise ValueError("Data is not a ZIP file or it is corrupted, unsupported format")
         self.load_media_types()
@@ -151,3 +180,121 @@ class OPC:
         pname = part_name[1:] if part_name.startswith('/') else part_name
         f = self.zipfile.open(pname)
         return f.read()
+
+    def update_signatures(self, sigs, output_filename):
+        logger.debug("In update_signatures")
+        real_sigs = []
+        for s in sigs:
+            kind, sig, part_name, mime_type = s
+            logger.debug("sig: {}, {}".format(kind, part_name))
+            parts = self.find(mime_type)
+            if len(parts) == 1:
+                real_sigs.append((kind, sig, parts[0], mime_type))
+            else:
+                real_sigs.append(s)
+
+        types = {
+            1: 'http://schemas.microsoft.com/office/2006/relationships/vbaProjectSignature',
+            2: 'http://schemas.microsoft.com/office/2014/relationships/vbaProjectSignatureAgile',
+            3: 'http://schemas.microsoft.com/office/2020/07/relationships/vbaProjectSignatureV3',
+        }
+        related = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        related += '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        for s in sorted(real_sigs, key=lambda x: -x[0].value):
+            kind, sig, part_name, mime_type = s
+            pos = part_name.index('/')
+            target = part_name[pos+1:]
+            related += '<Relationship Id="rId{}" Target="{}" Type="{}"/>'.format(kind.value, target, types[kind.value])
+        related += '</Relationships>'
+
+        parts = self.find('application/vnd.ms-office.vbaProject')
+        if len(parts) != 1:
+            raise NotimplementedError
+        vbaProjectPath = parts[0]
+        pos = vbaProjectPath.rfind('/')
+        relatedPath = vbaProjectPath[0:pos] + '/_rels' + vbaProjectPath[pos:] + '.rels'
+
+        media_types_location =  '[Content_Types].xml'
+        mtf = self.zipfile.open(media_types_location, mode='r')
+        media_types = mtf.read()
+        mtf.close()
+        pos = re.search(rb'<Override\s+ContentType="application/vnd.ms-office.vbaProject"', media_types)
+        if pos:
+            pos = media_types.find('<Override ')
+        if not pos or pos <0:
+            pos = media_types.find(b'</Types>')
+
+        sigs_by_partname = dict()
+        insertion = b''
+        for s in sorted(real_sigs, key=lambda x: x[0].value):
+            kind, sig, part_name, mime_type = s
+            sigs_by_partname[part_name] = s
+            insertion += ('<Override ContentType="{}" PartName="/{}"/>'.format(mime_type, part_name)).encode('ascii')
+        media_types = media_types[0:pos] + insertion + media_types[pos:]
+
+        zf = zipfile.ZipFile(output_filename, mode='w', compression=zipfile.ZIP_DEFLATED)
+        related_seen = False
+        for zi in self.zipfile.infolist():
+            logger.debug("Testing {}".format(zi.filename))
+            if zi.filename in sigs_by_partname:
+                logger.debug("Replacing {}".format(zi.filename))
+                contents = sigs_by_partname[zi.filename][1]
+                del sigs_by_partname[zi.filename]
+            elif zi.filename == media_types_location:
+                logger.debug("Replacing [Content_Types].xml")
+                contents = media_types
+            elif zi.filename == relatedPath:
+                logger.debug("Replacing {}".format(relatedPath))
+                related_seen = True
+                contents = related
+            else:
+                logger.debug("Did not match anything {}".format(zi.filename))
+                with self.zipfile.open(zi.filename) as f:
+                    contents = f.read()
+            zf.writestr(zi.filename, contents)
+        if not related_seen:
+            zf.writestr(relatedPath, related)
+        for info in sigs_by_partname.values():
+            kind, sig, part_name, mime_type = info
+            logger.debug("Adding to new zip {}".format(part_name))
+            zf.writestr(part_name, sig)
+
+        zf.close()
+        
+    def update_part(self, part_name, contents):
+        self.changes_pending.append(('U', part_name, contents, None))
+
+    def add_part(self, part_name, mime_type, contents):
+        self.changes_pending.append(('A', part_name, contents, mime_type))
+
+    def updated_file(self, filename):
+        
+        # for c in self.changes_pending:
+        
+        files = dict()
+        for zi in self.zipfile.infolist():
+            files[zi.filename] = zi
+
+        
+        
+        self.zipfile.writestr(part_name, contents)
+        # This should be done better and more robustly
+        new_val = ('<Override ContentType="{}" PartName="/{}"/>'.format(mime_type, part_name)).encode('ascii')
+        media_types_location =  '[Content_Types].xml'
+        mtf = self.zipfile.open(media_types_location, mode='r')
+        media_types = mtf.read()
+        mtf.close()
+        pos = media_types.find(b'</Types>')
+        new_media_types = media_types[0:pos] + new_val + media_types[pos:]
+        mtf = self.zipfile.open(media_types_location, mode='w')
+        mtf.write(new_media_types)
+        mtf.close()
+
+    def save(self, output_filename):
+        self.zipfile.close()
+        fin = open(self.path, 'rb')
+        fout = open(output_filename, 'wb')
+        fout.write(fin.read())
+        fin.close()
+        fout.close()
+        
